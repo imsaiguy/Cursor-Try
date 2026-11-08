@@ -14,6 +14,7 @@ Run it by hand against a running KiCad (API enabled) with
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -26,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .kicad_pcb import _arc_points
 from .model import Board, Pad, RouteSettings, Track, Via
-from .problem import BLOCKED, build_problem
+from .problem import BLOCKED, build_problem, net_status, nets_to_finish
 from .router import Router
 
 NM = 1e6
@@ -256,13 +257,16 @@ class IpcBoard:
 
     def apply(self, result, s: RouteSettings, remove_nets: Optional[Set[str]] = None) -> int:
         items = self.make_items(result, s)
+        old = []
+        if remove_nets:
+            old = [t for t in list(self.kb.get_tracks()) + list(self.kb.get_vias())
+                   if t.net and t.net.name in remove_nets and not t.locked]
+        if not items and not old:
+            return 0          # nothing to change: no empty undo step
         commit = self.kb.begin_commit()
         try:
-            if remove_nets:
-                old = [t for t in list(self.kb.get_tracks()) + list(self.kb.get_vias())
-                       if t.net and t.net.name in remove_nets and not t.locked]
-                if old:
-                    self.kb.remove_items(old)
+            if old:
+                self.kb.remove_items(old)
             if items:
                 self.kb.create_items(items)
             self.kb.push_commit(commit, "Visible Autorouter")
@@ -291,9 +295,8 @@ class Session:
         self.version = 0
         self.running = False
         self.stop = False
-        b = ipc.board
-        self.status = (f"Ready - {len(b.nets())} nets, {len(ipc.selected)} selected, "
-                       f"layers {', '.join(b.copper_layers)}. Choose what to route and press Route.")
+        self.static_version = 0
+        self.status = self._ready_text()
         self.log: List[str] = []
         self.curve: List[int] = []
         self.frame: dict = {}
@@ -303,9 +306,28 @@ class Session:
         self._last_push = 0.0
         self.router: Optional[Router] = None
 
+    def _counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for st in net_status(self.ipc.board).values():
+            counts[st] = counts.get(st, 0) + 1
+        return counts
+
+    def _ready_text(self) -> str:
+        c = self._counts()
+        b = self.ipc.board
+        todo = c.get("unrouted", 0) + c.get("partial", 0)
+        return (f"Ready - {c.get('routed', 0)} nets routed, {c.get('partial', 0)} partly routed, "
+                f"{c.get('unrouted', 0)} unrouted ({todo} to finish); {len(b.tracks)} existing track "
+                f"segments, {len(b.vias)} vias; layers {', '.join(b.copper_layers)}.")
+
     # -------------------------------------------------------------- static
     def static(self) -> dict:
         b = self.ipc.board
+        lidx = {n: i for i, n in enumerate(b.copper_layers)}
+        tracks = [[lidx.get(t.layer, 0), round(t.x1, 4), round(t.y1, 4), round(t.x2, 4), round(t.y2, 4),
+                   round(t.width, 4), t.net] for t in b.tracks if t.layer in lidx]
+        vias = [[round(v.x, 4), round(v.y, 4), round(v.diameter, 4), v.net] for v in b.vias]
+        status = net_status(b)
         pads = []
         for p in b.pads:
             if p.poly:
@@ -315,7 +337,9 @@ class Session:
         return {"outline": b.outline, "pads": pads, "bbox": b.bbox(), "layers": b.copper_layers,
                 "selected": sorted(self.ipc.selected), "nets": b.nets(),
                 "settings": self.ipc.settings.__dict__,
-                "holes": b.holes}
+                "holes": b.holes, "tracks": tracks, "vias": vias,
+                "status": status, "counts": self._counts(),
+                "to_finish": nets_to_finish(b), "static_version": self.static_version}
 
     def say(self, line: str):
         with self.lock:
@@ -333,31 +357,63 @@ class Session:
         if "max_passes" in opts:
             s.max_passes = int(opts["max_passes"])
         s.fanout_zone_nets = bool(opts.get("fanout", True))
-        nets = sorted(self.ipc.selected) if opts.get("scope") == "selected" and self.ipc.selected else None
+        scope = opts.get("scope", "unrouted")
+        rip = bool(opts.get("rip"))
+        if scope == "selected" and self.ipc.selected:
+            nets = sorted(self.ipc.selected)
+        elif scope == "unrouted":
+            # finish the ratsnest: only missing connections, existing copper is never touched
+            nets = nets_to_finish(self.ipc.board)
+            rip = False
+        else:
+            nets = None
         self.running, self.stop = True, False
         self.curve = []
-        threading.Thread(target=self._run, args=(s, nets, bool(opts.get("rip")), bool(opts.get("fill", True))),
+        with self.lock:
+            self.frame = {}
+            self.version += 1
+        threading.Thread(target=self._run, args=(s, nets, rip, bool(opts.get("fill", True)), scope),
                          daemon=True).start()
 
-    def _run(self, s, nets, rip, fill):
+    def _run(self, s, nets, rip, fill, scope="all"):
         try:
             board = self.ipc.board
             remove = None
+            if scope == "unrouted":
+                self.say(f"Unrouted only: finishing {len(nets)} net(s); existing tracks and vias are kept.")
+                if not nets:
+                    self.say("Nothing to route - every net is already connected.")
+                    self.status = "Nothing to route - every net is already connected."
+                    return
             if rip:
                 remove = set(nets) if nets else set(board.nets())
-                board.tracks = [t for t in board.tracks if t.net not in remove]
-                board.vias = [v for v in board.vias if v.net not in remove]
+                # work on a copy: the KiCad board only changes when the result is committed
+                board = dataclasses.replace(board, tracks=[t for t in board.tracks if t.net not in remove],
+                                            vias=[v for v in board.vias if v.net not in remove])
+                n_old = len(self.ipc.board.tracks) + len(self.ipc.board.vias) - len(board.tracks) - len(board.vias)
+                self.say(f"Re-routing from scratch: {n_old} existing track/via item(s) of these nets will be "
+                         "replaced (only if the run completes).")
             t0 = time.time()
             pb = build_problem(board, s, nets)
             g = pb.grid
             with self.lock:
                 self.grid_info = {"x0": g.x0, "y0": g.y0, "pitch": g.pitch, "nx": g.nx, "ny": g.ny,
                                   "nl": g.nl, "layers": g.layers}
+            if not pb.nets:
+                self.say("Nothing to route - every net is already connected"
+                         + (" (pour nets are connected by their zones)." if board.zone_nets else "."))
+                self.status = "Nothing to route - every net is already connected."
+                return
             self.say(f"Grid {g.nx} x {g.ny} x {g.nl} layers @ {g.pitch:.3f} mm, {len(pb.nets)} nets to route.")
             self.router = Router(pb, self._event, record_exploration=True)
             res = self.router.run()
             self._push_frame(None, None, force=True)
             self.say(res.summary())
+            stuck = sorted(n for n, nr in res.nets.items() if not nr.complete)
+            if scope == "unrouted" and stuck:
+                self.say(f"{len(stuck)} net(s) could not be finished around the existing tracks "
+                         f"({', '.join(stuck)}). To let the router move copper: select those parts, "
+                         "choose Selected, tick 'Remove existing tracks' and Route again.")
             if res.cancelled:
                 self.say("Stopped - nothing was written to the board.")
                 self.status = "Stopped."
@@ -372,9 +428,12 @@ class Session:
             self.say(f"Added {n} tracks/vias in {time.time() - t0:.1f}s as ONE undo step "
                      "(Edit > Undo in KiCad reverts it). Run DRC to double-check.")
             self.status = res.summary().splitlines()[0]
-            # re-read so a second run sees the new copper
+            # re-read so the view and a second run see the new copper
             try:
                 self.ipc = IpcBoard(self.ipc.kb)
+                with self.lock:
+                    self.static_version += 1      # the page re-reads the board (now incl. new copper)
+                self.say(self._ready_text())
             except Exception:
                 pass
         except Exception as exc:
@@ -446,6 +505,7 @@ class Session:
         self.last_poll = time.time()
         with self.lock:
             return {"version": self.version, "running": self.running, "status": self.status,
+                    "static_version": self.static_version,
                     "log": self.log[-200:], "curve": self.curve, "frame": self.frame, "grid": self.grid_info}
 
 

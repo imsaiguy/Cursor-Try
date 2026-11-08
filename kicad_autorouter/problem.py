@@ -214,6 +214,49 @@ def _cluster(net: str, pads: List[Pad], tracks: List[Track], vias: List[Via]):
     return list(groups.values())
 
 
+ROUTED, PARTIAL, UNROUTED, POUR, SINGLE = "routed", "partial", "unrouted", "pour", "single"
+
+
+def net_status(board: Board) -> Dict[str, str]:
+    """Classify every net from its existing copper (no grid needed, fast):
+
+    routed    all pads already joined by tracks/vias
+    partial   some tracks exist, but pads are still unconnected
+    unrouted  no tracks at all, 2+ pads
+    pour      has a copper zone (the pour connects it)
+    single    fewer than two pads - nothing to route
+    """
+    pads: Dict[str, List[Pad]] = {}
+    for p in board.pads:
+        if p.net:
+            pads.setdefault(p.net, []).append(p)
+    trk: Dict[str, List[Track]] = {}
+    for t in board.tracks:
+        trk.setdefault(t.net, []).append(t)
+    vias: Dict[str, List[Via]] = {}
+    for v in board.vias:
+        vias.setdefault(v.net, []).append(v)
+    out: Dict[str, str] = {}
+    for name, ps in pads.items():
+        if name in board.zone_nets:
+            out[name] = POUR
+        elif len(ps) < 2:
+            out[name] = SINGLE
+        elif not trk.get(name) and not vias.get(name):
+            out[name] = UNROUTED
+        else:
+            clusters = _cluster(name, ps, trk.get(name, []), vias.get(name, []))
+            n_with_pads = sum(1 for cl in clusters if any(k == "p" for k, _ in cl))
+            out[name] = ROUTED if n_with_pads <= 1 else PARTIAL
+    return out
+
+
+def nets_to_finish(board: Board) -> List[str]:
+    """Nets with missing connections (unrouted or partly routed), plus pour nets
+    (their SMD pads may still need a fan-out via).  Existing copper is kept."""
+    return sorted(n for n, st in net_status(board).items() if st in (UNROUTED, PARTIAL, POUR))
+
+
 def build_problem(board: Board, settings: RouteSettings,
                   nets: Optional[Iterable[str]] = None) -> Problem:
     s = settings

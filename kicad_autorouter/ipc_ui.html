@@ -15,6 +15,8 @@
   fieldset { border:1px solid var(--line); border-radius:6px; margin:0 0 10px; padding:8px 10px; }
   legend { color:var(--muted); font-size:12px; padding:0 4px; }
   label { display:flex; align-items:center; gap:6px; margin:4px 0; }
+  .muted { color:var(--muted); font-size:12px; margin:2px 0 8px; }
+  label:has(input:disabled) { opacity:.45; }
   .row { display:flex; justify-content:space-between; align-items:center; margin:3px 0; }
   .row input { width:80px; background:#111317; color:var(--text); border:1px solid var(--line);
                border-radius:4px; padding:3px 6px; }
@@ -39,9 +41,13 @@
 <div class="app">
   <aside>
     <h1>Visible Autorouter</h1>
+    <div id="summary" class="muted"></div>
     <fieldset><legend>What to route</legend>
+      <label title="Only the missing connections (the ratsnest). Existing tracks and vias are never moved or removed.">
+        <input type="radio" name="scope" value="unrouted" id="scopeUnr" checked> <span id="unrLabel">Unrouted only</span></label>
       <label><input type="radio" name="scope" value="selected" id="scopeSel"> <span id="selLabel">Selected</span></label>
-      <label><input type="radio" name="scope" value="all" id="scopeAll" checked> All nets</label>
+      <label><input type="radio" name="scope" value="all" id="scopeAll"> All nets</label>
+      <div id="scopeHelp" class="muted"></div>
     </fieldset>
     <fieldset><legend>Rules (Default net class)</legend>
       <div class="row">Track width (mm) <input id="track_width"></div>
@@ -52,7 +58,8 @@
       <div class="row">Max passes <input id="max_passes"></div>
       <div class="row">Via cost (grid steps) <input id="via_cost"></div>
     </fieldset>
-    <label><input type="checkbox" id="rip"> Remove existing tracks of these nets first</label>
+    <label><input type="checkbox" id="rip"> Remove existing tracks of these nets first (re-route from scratch)</label>
+    <label><input type="checkbox" id="showOld" checked> Show existing tracks</label>
     <label><input type="checkbox" id="fanout" checked> Fan out pour nets (GND…) with a via</label>
     <label><input type="checkbox" id="fill" checked> Refill zones when done</label>
     <div style="display:flex; gap:8px; margin-top:10px">
@@ -67,6 +74,7 @@
     <div id="status">Loading board…</div>
     <div class="stage"><canvas id="board"></canvas></div>
     <footer>
+      <span class="sw" style="background:#7a3a35"></span>existing copper
       <span class="sw" style="background:var(--front)"></span>front
       <span class="sw" style="background:var(--back)"></span>back
       <span class="sw" style="background:#e0782a"></span>learned congestion
@@ -87,16 +95,39 @@ async function j(url, body) {
 }
 
 async function init() {
-  S = await j("/static");
+  await loadStatic();
   const s = S.settings;
   for (const k of ["track_width","clearance","via_diameter","via_drill","edge_clearance","max_passes","via_cost"])
     $(k).value = +(+s[k]).toFixed(4);
-  const n = S.selected.length;
-  $("selLabel").textContent = `Selected (${n} net${n === 1 ? "" : "s"})`;
-  if (n) $("scopeSel").checked = true; else $("scopeSel").disabled = true;
-  $("status").textContent = `Ready - ${S.nets.length} nets on the board, layers ${S.layers.join(", ")}.`;
-  resize(); poll();
+  if (S.selected.length) $("scopeSel").checked = true;
+  scopeChanged(); resize(); poll();
 }
+
+async function loadStatic() {
+  S = await j("/static");
+  const c = S.counts, todo = (c.unrouted || 0) + (c.partial || 0), n = S.selected.length;
+  $("summary").innerHTML = `Board: <b>${c.routed || 0}</b> routed · <b>${c.partial || 0}</b> partly routed · ` +
+    `<b>${c.unrouted || 0}</b> unrouted${c.pour ? ` · ${c.pour} pour` : ""}<br>` +
+    `${S.tracks.length} existing track segments, ${S.vias.length} vias`;
+  $("unrLabel").textContent = `Unrouted only (${todo} net${todo === 1 ? "" : "s"} to finish)`;
+  $("selLabel").textContent = `Selected (${n} net${n === 1 ? "" : "s"})`;
+  $("scopeSel").disabled = !n;
+  if (!n && $("scopeSel").checked) $("scopeUnr").checked = true;
+  draw();
+}
+
+function scopeChanged() {
+  const sc = document.querySelector("input[name=scope]:checked").value;
+  $("rip").disabled = sc === "unrouted";
+  if (sc === "unrouted") $("rip").checked = false;
+  $("scopeHelp").textContent = {
+    unrouted: "Finishes only the missing connections. Existing tracks and vias stay exactly as they are.",
+    selected: "Routes the nets of the selected parts/pads/tracks. Existing copper is kept unless you tick Remove.",
+    all: "Every net. Existing copper is kept (and connected to) unless you tick Remove - then all nets are re-routed.",
+  }[sc];
+}
+document.querySelectorAll("input[name=scope]").forEach(r => r.addEventListener("change", scopeChanged));
+$("showOld").addEventListener("change", () => draw());
 
 function view() {
   const [x0,y0,x1,y1] = S.bbox, m = 1;
@@ -134,6 +165,18 @@ function draw() {
     ctx.fill();
   }
   for (const [hx, hy, hd] of S.holes) { ctx.fillStyle = "#0a0c0e"; ctx.beginPath(); ctx.arc(v.X(hx), v.Y(hy), hd / 2 * v.sc, 0, 7); ctx.fill(); }
+  // existing copper, dimmed so the router's new work stands out (back layers first)
+  if ($("showOld").checked) {
+    ctx.lineCap = "round"; ctx.globalAlpha = .5;
+    for (const t of S.tracks.slice().sort((a, b) => b[0] - a[0])) {
+      ctx.strokeStyle = LAYER[t[0] % LAYER.length];
+      ctx.lineWidth = Math.max(1 * dpr, t[5] * v.sc);
+      ctx.beginPath(); ctx.moveTo(v.X(t[1]), v.Y(t[2])); ctx.lineTo(v.X(t[3]), v.Y(t[4])); ctx.stroke();
+    }
+    ctx.fillStyle = "#bbb";
+    for (const [x, y, d] of S.vias) { ctx.beginPath(); ctx.arc(v.X(x), v.Y(y), Math.max(2 * dpr, d / 2 * v.sc), 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  }
   if (!G) return;
   const P = xy => [v.X(G.x0 + (xy % G.nx) * G.pitch), v.Y(G.y0 + Math.floor(xy / G.nx) * G.pitch)];
   // tracks: back layers first
@@ -171,6 +214,7 @@ function drawCurve() {
 async function poll() {
   try {
     const st = await j("/state");
+    if (S && st.static_version !== S.static_version) await loadStatic();
     if (st.version !== lastVersion) {
       lastVersion = st.version; ST = st;
       $("status").textContent = st.status;

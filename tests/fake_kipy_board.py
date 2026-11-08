@@ -6,7 +6,7 @@ adapter's reading and writing code paths run for real in the tests.
 import math
 import uuid
 
-from kipy.board_types import BoardSegment, FootprintInstance, Net, Pad as KPad, Zone
+from kipy.board_types import BoardSegment, FootprintInstance, Net, Pad as KPad, Track as KTrack, Via as KVia, Zone
 from kipy.geometry import PolygonWithHoles, PolyLine, PolyLineNode, Vector2
 from kipy.proto.board.board_types_pb2 import BoardLayer, PadType, ZoneType
 
@@ -78,6 +78,22 @@ class FakeKiCadBoard:
             kp.pad_type = PadType.PT_NPTH
             kp.padstack.drill.diameter = _v(hd, hd)
             self.pads.append(kp)
+        # existing copper already on the board
+        self.existing = []
+        for t in model_board.tracks:
+            kt = KTrack()
+            kt.start, kt.end = _v(t.x1, t.y1), _v(t.x2, t.y2)
+            kt.width = int(round(t.width * NM))
+            kt.layer = LAYERS[t.layer]
+            kt.net = self._net(t.net)
+            self.existing.append(kt)
+        for v in model_board.vias:
+            kv = KVia()
+            kv.position = _v(v.x, v.y)
+            kv.diameter = int(round(v.diameter * NM))
+            kv.drill_diameter = int(round((v.drill or 0.3) * NM))
+            kv.net = self._net(v.net)
+            self.existing.append(kv)
         self.selection = [p for p in self.pads
                           if any(p.parent and p.parent.value == f.id.value and
                                  f.reference_field.text.value in selected_refs for f in self.fps)]
@@ -114,10 +130,10 @@ class FakeKiCadBoard:
         return [q for q in (mk(p) for p in pads) if q is not None]
 
     def get_tracks(self):
-        return [i for i in self.created if type(i).__name__ in ("Track", "ArcTrack")]
+        return [i for i in self.existing + self.created if type(i).__name__ in ("Track", "ArcTrack")]
 
     def get_vias(self):
-        return [i for i in self.created if type(i).__name__ == "Via"]
+        return [i for i in self.existing + self.created if type(i).__name__ == "Via"]
 
     def get_zones(self):
         out = []
@@ -164,6 +180,7 @@ class FakeKiCadBoard:
         self.removed.extend(items)
         ids = {id(i) for i in items}
         self.created = [c for c in self.created if id(c) not in ids]
+        self.existing = [c for c in self.existing if id(c) not in ids]
 
     def push_commit(self, commit, message=""):
         self.commits[-1][0] = "pushed: " + message

@@ -158,6 +158,13 @@ class Visualizer:
                 ax.add_patch(Polygon(pts, closed=True, color=col, zorder=2, alpha=0.9))
             if p.drill > 0:
                 ax.add_patch(Circle((p.x, p.y), p.drill / 2, color="#0d2416", zorder=3))
+        # existing copper (already on the board), muted so new routes stand out
+        lidx = {n: i for i, n in enumerate(b.copper_layers)}
+        for t in sorted(b.tracks, key=lambda t: -lidx.get(t.layer, 0)):
+            ax.plot([t.x1, t.x2], [t.y1, t.y2], color=LAYER_COLORS[lidx.get(t.layer, 0) % len(LAYER_COLORS)],
+                    lw=1.2, alpha=0.45, solid_capstyle="round", zorder=2.5)
+        for v in b.vias:
+            ax.add_patch(Circle((v.x, v.y), v.diameter / 2, fc="#9a9a9a", ec="none", alpha=0.6, zorder=2.6))
         x0, y0, x1, y1 = b.bbox()
         m = 1.0
         ax.set_xlim(x0 - m, x1 + m)

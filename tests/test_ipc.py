@@ -104,3 +104,80 @@ def test_ipc_output_passes_kicad_drc(tmp_path):
     copper = {k: v for k, v in kinds.items() if k in ("clearance", "shorting_items", "tracks_crossing",
                                                       "copper_edge_clearance", "hole_clearance")}
     assert copper == {} and unconnected == 0
+
+
+# ---------------------------------------------------------------- existing copper
+ROUTED = os.path.join(ROOT, "examples", "demo_routed.kicad_pcb")
+
+
+def _partly_routed_model():
+    """The routed demo board with D1 and D2 ripped out completely and half of +3V3 removed."""
+    m = PcbFile(ROUTED).board()
+    v33 = [t for t in m.tracks if t.net == "+3V3"]
+    drop = set(map(id, v33[: len(v33) // 2]))
+    m.tracks = [t for t in m.tracks if t.net not in ("D1", "D2") and id(t) not in drop]
+    m.vias = [v for v in m.vias if v.net not in ("D1", "D2")]
+    return m
+
+
+def test_ipc_shows_existing_copper_and_net_status():
+    model = _partly_routed_model()
+    session = Session(IpcBoard(FakeKiCadBoard(model)))
+    st = session.static()
+    assert len(st["tracks"]) == len(model.tracks) and len(st["vias"]) == len(model.vias)
+    assert st["status"]["D1"] == "unrouted" and st["status"]["D2"] == "unrouted"
+    assert st["status"]["+3V3"] == "partial" and st["status"]["D7"] == "routed"
+    assert set(st["to_finish"]) >= {"D1", "D2", "+3V3"} and "D7" not in st["to_finish"]
+    assert "partly routed" in session.status
+
+
+def test_unrouted_only_keeps_existing_copper(tmp_path):
+    model = _partly_routed_model()
+    fake = FakeKiCadBoard(model)
+    ipc = IpcBoard(fake)
+    before = list(fake.existing)
+    session = Session(ipc)
+    _run(session, {"scope": "unrouted", "rip": True})          # rip must be ignored in this scope
+    log = "\n".join(session.log)
+    assert "ERROR" not in log, log
+    assert fake.removed == [] and fake.existing == before       # nothing existing touched
+    touched = {i.net.name for i in fake.created}
+    assert touched <= {"D1", "D2", "+3V3", "GND"} and {"D1", "D2", "+3V3"} <= touched
+    # new + existing copper together: legal, and every pad connected (KiCad DRC)
+    pytest.importorskip("pcbnew")
+    from drc_check import drc
+    pcb = PcbFile(ROUTED)
+    res = _to_result(fake.created, ipc.settings)
+    pcb_text_model = _partly_routed_model()
+    # rebuild a file holding exactly the partly-routed copper, then add the new items
+    import re
+    text = pcb.text
+    keep = {(round(t.x1, 4), round(t.y1, 4), round(t.x2, 4), round(t.y2, 4)) for t in pcb_text_model.tracks}
+    keepv = {(round(v.x, 4), round(v.y, 4)) for v in pcb_text_model.vias}
+
+    def seg_ok(m):
+        x1, y1, x2, y2 = (round(float(m.group(i)), 4) for i in range(1, 5))
+        return m.group(0) if (x1, y1, x2, y2) in keep else ""
+
+    def via_ok(m):
+        return m.group(0) if (round(float(m.group(1)), 4), round(float(m.group(2)), 4)) in keepv else ""
+    text = re.sub(r"\s*\(segment \(start ([-\d.]+) ([-\d.]+)\) \(end ([-\d.]+) ([-\d.]+)\).*?\)\)\n?", seg_ok, text)
+    text = re.sub(r"\s*\(via \(at ([-\d.]+) ([-\d.]+)\).*?\)\)\n?", via_ok, text)
+    pcb.text = text
+    pcb.add_routes(res, ipc.settings)
+    out = str(tmp_path / "finished.kicad_pcb")
+    pcb.save(out)
+    assert len(PcbFile(out).board().tracks) == len(pcb_text_model.tracks) + sum(len(n.segments) for n in res.nets.values())
+    kinds, unconnected, _ = drc(out)
+    copper = {k: v for k, v in kinds.items() if k in ("clearance", "shorting_items", "tracks_crossing",
+                                                      "copper_edge_clearance", "hole_clearance")}
+    assert copper == {} and unconnected == 0
+
+
+def test_unrouted_only_with_nothing_to_do():
+    model = PcbFile(ROUTED).board()
+    fake = FakeKiCadBoard(model)
+    session = Session(IpcBoard(fake))
+    _run(session, {"scope": "unrouted"})
+    assert fake.created == [] and fake.commits == []
+    assert "Nothing to route" in session.status

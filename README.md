@@ -14,10 +14,21 @@ zero.*
 
 ## What it does
 
-* **Route all, or route the selection.** Select footprints, pads or tracks in
-  the editor, and only their nets are routed. Existing copper is respected:
-  already-connected pieces count as one terminal, and other nets' tracks are
-  obstacles.
+* **Three scopes:**
+  * **Unrouted only** (the default): finishes just the missing connections,
+    i.e. the ratsnest. **Existing tracks and vias are never moved or
+    removed.** Partly routed nets get only their missing links, and new
+    copper joins onto what's there.
+  * **Selected:** the nets of the selected footprints, pads or tracks.
+  * **All nets.**
+
+  For *Selected* and *All* you can tick **Remove existing tracks** to re-route
+  those nets from scratch. Otherwise existing copper is kept: connected pieces
+  count as one terminal, and other nets' tracks are obstacles.
+* **Sees your existing work.** When it loads the design it shows existing
+  tracks and vias (muted, so new routes stand out) and a summary such as
+  *"8 routed · 1 partly routed · 2 unrouted"*. If a net can't be finished
+  around fixed copper, it says which net and how to free it.
 * **Multiple passes.** It uses the negotiated-congestion "PathFinder" algorithm
   with A* search per connection, which is the standard method for FPGA routing.
 * **Visible thinking.** You can watch the A* wavefront, tentative tracks,
@@ -101,16 +112,17 @@ one depending on which folder you copy it into.
 4. Open a board. The **Visible Autorouter** button (two crossing traces) is on
    the PCB editor's toolbar.
 
-Click it and your web browser opens the router's window. Choose **Selected**
-or **All nets**, check the rules (they come from the Default net class), and
-press **Route**. The board on the right shows the router thinking, and the
+Click it and your web browser opens the router's window. It shows your board
+with its existing tracks and a routed / partly routed / unrouted summary.
+Choose **Unrouted only** (the default), **Selected**, or **All nets**, check
+the rules (they come from the Default net class), and press **Route**.
 chart shows conflicts dropping pass by pass.
 
 When it finishes, the tracks and vias go onto your board as **one undo step**
 (Edit ▸ Undo removes them all), and zones are refilled. Press **Close** when
 you're done.
 
-![KiCad 10 plugin window mid-route (pass 4)](docs/kicad10_ui.png)
+![KiCad 10 plugin window: "Unrouted only" just finished 3 nets (bright) around the existing copper (muted)](docs/kicad10_ui.png)
 
 ### KiCad 7 / 8: classic action plugin
 
@@ -119,6 +131,8 @@ you're done.
 2. Copy the `kicad_autorouter` folder there, then **restart KiCad** (or use
    **Tools ▸ External Plugins ▸ Refresh Plugins**).
 3. Use the toolbar button, or **Tools ▸ External Plugins ▸ Visible Autorouter**.
+   The dialog opens showing existing tracks and the routed / partly / unrouted
+   summary, with the same three scopes (Unrouted only is the default).
 
 ![KiCad 7 dialog mid-route (pass 4)](docs/plugin_dialog.png)
 

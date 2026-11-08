@@ -28,6 +28,7 @@ class Pad:
     layers: Set[str] = field(default_factory=set)   # copper layer names
     drill: float = 0.0          # >0 for through-hole pads
     ref: str = ""               # "U1.3" — only used for messages
+    poly: Optional[List[Point]] = None  # exact copper outline (from KiCad's API); overrides shape
 
     def local(self, px: float, py: float) -> Point:
         """Point -> pad-local frame (undo position and rotation)."""
@@ -39,6 +40,8 @@ class Pad:
 
     def distance(self, px: float, py: float) -> float:
         """Distance from a point to the pad copper (0 inside)."""
+        if self.poly:
+            return _poly_distance(self.poly, px, py)
         lx, ly = self.local(px, py)
         hw, hh = self.w / 2.0, self.h / 2.0
         if self.shape == "circle":
@@ -59,7 +62,28 @@ class Pad:
 
     def radius(self) -> float:
         """Radius of a circle that encloses the pad."""
+        if self.poly:
+            return max(math.hypot(x - self.x, y - self.y) for (x, y) in self.poly)
         return math.hypot(self.w, self.h) / 2.0
+
+
+def _poly_distance(pts: List[Point], px: float, py: float) -> float:
+    """0 inside a closed polygon, otherwise the distance to its boundary."""
+    inside = False
+    best = float("inf")
+    n = len(pts)
+    for i in range(n):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % n]
+        if (y1 > py) != (y2 > py) and px < x1 + (py - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+        dx, dy = x2 - x1, y2 - y1
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 1e-18 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / L2))
+        d = math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+        if d < best:
+            best = d
+    return 0.0 if inside else best
 
 
 @dataclass

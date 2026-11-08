@@ -1,0 +1,22 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "com.github.imsaiguy.visible-autorouter",
+  "name": "Visible Autorouter",
+  "description": "Multi-pass negotiated-congestion autorouter. Routes the selected nets or everything, and shows its thinking.",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.9"
+  },
+  "actions": [
+    {
+      "identifier": "route",
+      "name": "Visible Autorouter",
+      "description": "Route the selection (or all nets) and watch the router think",
+      "show-button": true,
+      "scopes": ["pcb"],
+      "entrypoint": "ipc_action.py",
+      "icons-light": ["icon.png"],
+      "icons-dark": ["icon.png"]
+    }
+  ]
+}

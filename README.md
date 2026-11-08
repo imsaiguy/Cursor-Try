@@ -75,21 +75,64 @@ is always DRC-legal.
 
 ## Install in KiCad
 
+The same `kicad_autorouter` folder contains two plugins. KiCad picks the right
+one depending on which folder you copy it into.
+
+### KiCad 10 (and 9): IPC API plugin, recommended
+
+1. **Turn the KiCad API on.** It is **off by default**. Go to
+   **Preferences ▸ Preferences ▸ Plugins** and tick the option that enables
+   the KiCad API.
+2. **Copy the `kicad_autorouter` folder** (the whole folder, not its contents)
+   into KiCad's **`plugins`** folder. Create the folder if it doesn't exist.
+
+   | OS | folder |
+   |---|---|
+   | Windows | `Documents\KiCad\10.0\plugins\` |
+   | macOS | `~/Documents/KiCad/10.0/plugins/` |
+   | Linux | `~/.local/share/kicad/10.0/plugins/` |
+
+   You should end up with `.../10.0/plugins/kicad_autorouter/plugin.json`.
+   **Note: this is `plugins`, not `scripting/plugins`.**
+3. **Restart KiCad.** The first time, KiCad builds a small Python environment
+   for the plugin and installs `kicad-python` from `requirements.txt`. That
+   needs internet access once and can take a minute before the button becomes
+   active.
+4. Open a board. The **Visible Autorouter** button (two crossing traces) is on
+   the PCB editor's toolbar.
+
+Click it and your web browser opens the router's window. Choose **Selected**
+or **All nets**, check the rules (they come from the Default net class), and
+press **Route**. The board on the right shows the router thinking, and the
+chart shows conflicts dropping pass by pass.
+
+When it finishes, the tracks and vias go onto your board as **one undo step**
+(Edit ▸ Undo removes them all), and zones are refilled. Press **Close** when
+you're done.
+
+![KiCad 10 plugin window mid-route (pass 4)](docs/kicad10_ui.png)
+
+### KiCad 7 / 8: classic action plugin
+
 1. In the PCB editor: **Tools ▸ External Plugins ▸ Open Plugin Directory**.
-2. Copy (or symlink) the `kicad_autorouter` folder into that directory.
-3. **Tools ▸ External Plugins ▸ Refresh Plugins**. A toolbar button appears
-   (two crossing traces).
+   This is the `scripting/plugins` folder.
+2. Copy the `kicad_autorouter` folder there, then **restart KiCad** (or use
+   **Tools ▸ External Plugins ▸ Refresh Plugins**).
+3. Use the toolbar button, or **Tools ▸ External Plugins ▸ Visible Autorouter**.
 
-![The plugin dialog mid-route (pass 4) - KiCad 7, wxPython](docs/plugin_dialog.png)
+![KiCad 7 dialog mid-route (pass 4)](docs/plugin_dialog.png)
 
-Select what you want routed, or nothing at all, and click it:
+### Button not showing?
 
-* Rules come from the board's Default net class, and you can edit them in the
-  dialog.
-* **Route** starts. **Stop** keeps the best result so far.
-* Everything the router adds is a single undo step (**Edit ▸ Undo**).
-* Optional: remove existing tracks of these nets first, fan out pour nets,
-  refill zones, and live preview on the board after each pass.
+* **Check the path.** With a ZIP download the folder often ends up one level
+  too deep, e.g. `plugins/Cursor-Try-main/kicad_autorouter/`. Move
+  `kicad_autorouter` up so it sits directly in `plugins/`.
+* **KiCad 10:** check that the KiCad API is enabled (step 1). Also check
+  **Preferences ▸ Plugins** for errors: if `requirements.txt` couldn't be
+  installed (no internet, or no Python interpreter configured), the plugin is
+  listed there with the reason.
+* **KiCad 7/8:** see **Tools ▸ External Plugins ▸ Show Plugin Errors** (or the
+  Scripting Console).
 
 ## Command line (no KiCad GUI needed)
 
@@ -127,10 +170,12 @@ pcb.add_routes(result, pcb.settings_from_project()); pcb.save("routed.kicad_pcb"
 | `kicad_autorouter/router.py` | A*, PathFinder passes, pour check, events, geometry output |
 | `kicad_autorouter/viz.py` | matplotlib live view / GIF / PNG |
 | `kicad_autorouter/kicad_pcb.py` | `.kicad_pcb` reader and writer (KiCad 6–9 S-expression format) |
-| `kicad_autorouter/plugin.py` | KiCad action plugin: dialog, thinking panel, pcbnew adapter |
+| `kicad_autorouter/plugin.json`, `ipc_action.py`, `requirements.txt` | KiCad 9/10 IPC plugin manifest and entry point |
+| `kicad_autorouter/ipc_plugin.py`, `ipc_ui.html` | KiCad 9/10 adapter (kicad-python), browser thinking view, single-commit writeback |
+| `kicad_autorouter/plugin.py` | KiCad 7/8 SWIG action plugin: wx dialog, thinking panel, pcbnew adapter |
 | `examples/make_test_board.py` | builds the demo board with KiCad's own `pcbnew` API |
 | `examples/drc_check.py` | fills zones and runs KiCad's DRC on a board |
-| `tests/` | exact-geometry clearance and connectivity checks, plus a KiCad DRC test |
+| `tests/` | exact-geometry clearance and connectivity checks, KiCad DRC test, and IPC-adapter tests on real `kipy` objects |
 
 ```bash
 python -m pytest tests        # the DRC test runs when pcbnew is importable
@@ -138,11 +183,17 @@ python -m pytest tests        # the DRC test runs when pcbnew is importable
 
 ## Status and honest limitations
 
-What's been tested: KiCad **7.0.11** on Linux. That covers the file
-reader/writer, the `pcbnew` adapter, and the dialog itself, driven
-automatically under a virtual display. The KiCad 8/9 API differences
-(`uuid` vs `tstamp`, layer arguments on pad getters, etc.) are handled with
-fallbacks, but **nobody has tested them on 8/9 yet**.
+What's been tested:
+
+* **KiCad 7.0.11 on Linux:** the file reader/writer, the `pcbnew` adapter, and
+  the wx dialog itself (driven automatically under a virtual display).
+* **KiCad 10 path:** the manifest validates against KiCad 10.0's own plugin
+  schema, and the adapter is built against `kicad-python` 0.8 (the KiCad
+  10.0.6 API). Tests drive it with real `kipy` objects: reading pads, the
+  selection and zones, building tracks and vias, one commit. The browser view
+  was tested in Chromium, and the output passes KiCad's DRC. **It has not yet
+  been run inside a live KiCad 10.** If anything misbehaves, the plugin's
+  error text appears in KiCad's plugin messages.
 
 * One track width and clearance for all routed nets (the Default net class).
   Per-net-class widths are not supported yet.
@@ -151,8 +202,9 @@ fallbacks, but **nobody has tested them on 8/9 yet**.
   centre.
 * Through vias only. No differential pairs, no length tuning.
 * **Rule areas / keepouts are not read yet.** Check DRC if your board uses them.
-* Custom and trapezoid pads are treated as their bounding rectangle
-  (conservative).
+* KiCad 7/8 plugin and CLI: custom and trapezoid pads are treated as their
+  bounding rectangle (conservative). The KiCad 10 plugin uses KiCad's exact
+  pad polygons.
 * The pour estimate is approximate. Refill the zones and run DRC afterwards
   (the plugin refills for you).
 * Pure Python. About 3 s for the 12-net demo, about 20 s for 34 random nets on
@@ -160,7 +212,7 @@ fallbacks, but **nobody has tested them on 8/9 yet**.
 
 ## Ideas for next steps
 
-* KiCad 9 **IPC API** front end (live, non-blocking updates of the board).
+* Live preview on the KiCad 10 canvas itself, in addition to the browser view.
 * Per-net-class widths and rule areas.
 * A C/Rust inner loop for the A* search.
 * A post-route "push-and-shove" cleanup pass to straighten tracks and remove

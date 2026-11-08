@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visible Autorouter</title>
+<style>
+  :root { --bg:#14161a; --panel:#1c1f24; --line:#2c3038; --text:#e8eaed; --muted:#9aa0a6;
+          --accent:#ffe14d; --front:#e8433a; --back:#3b7ddd; --ok:#3fae5a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.4 system-ui, sans-serif; }
+  .app { display:grid; grid-template-columns: 300px 1fr; height:100vh; }
+  aside { background:var(--panel); border-right:1px solid var(--line); padding:14px; overflow:auto; }
+  h1 { font-size:16px; margin:0 0 10px; }
+  fieldset { border:1px solid var(--line); border-radius:6px; margin:0 0 10px; padding:8px 10px; }
+  legend { color:var(--muted); font-size:12px; padding:0 4px; }
+  label { display:flex; align-items:center; gap:6px; margin:4px 0; }
+  .row { display:flex; justify-content:space-between; align-items:center; margin:3px 0; }
+  .row input { width:80px; background:#111317; color:var(--text); border:1px solid var(--line);
+               border-radius:4px; padding:3px 6px; }
+  button { background:#2b3038; color:var(--text); border:1px solid var(--line); border-radius:6px;
+           padding:7px 14px; cursor:pointer; font-weight:600; }
+  button.primary { background:#2f6f3e; border-color:#3c8a4e; }
+  button:disabled { opacity:.45; cursor:default; }
+  #log { background:#0f1114; border:1px solid var(--line); border-radius:6px; padding:6px;
+         font:12px/1.35 ui-monospace, monospace; white-space:pre-wrap; height:220px; overflow:auto; margin-top:10px; }
+  main { display:grid; grid-template-rows:auto 1fr auto; min-width:0; }
+  #status { padding:10px 14px; border-bottom:1px solid var(--line); }
+  .stage { position:relative; min-height:0; }
+  canvas#board { width:100%; height:100%; display:block; }
+  #curve { display:block; width:100%; margin-top:10px; background:#0f1114;
+           border:1px solid var(--line); border-radius:6px; }
+  footer { padding:6px 14px; color:var(--muted); font-size:12px; border-top:1px solid var(--line); }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; vertical-align:middle; margin:0 3px 0 10px; }
+  @media (max-width: 760px) { .app { grid-template-columns: 1fr; height:auto; } .stage { height:70vh; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <h1>Visible Autorouter</h1>
+    <fieldset><legend>What to route</legend>
+      <label><input type="radio" name="scope" value="selected" id="scopeSel"> <span id="selLabel">Selected</span></label>
+      <label><input type="radio" name="scope" value="all" id="scopeAll" checked> All nets</label>
+    </fieldset>
+    <fieldset><legend>Rules (Default net class)</legend>
+      <div class="row">Track width (mm) <input id="track_width"></div>
+      <div class="row">Clearance (mm) <input id="clearance"></div>
+      <div class="row">Via diameter (mm) <input id="via_diameter"></div>
+      <div class="row">Via drill (mm) <input id="via_drill"></div>
+      <div class="row">Edge clearance (mm) <input id="edge_clearance"></div>
+      <div class="row">Max passes <input id="max_passes"></div>
+      <div class="row">Via cost (grid steps) <input id="via_cost"></div>
+    </fieldset>
+    <label><input type="checkbox" id="rip"> Remove existing tracks of these nets first</label>
+    <label><input type="checkbox" id="fanout" checked> Fan out pour nets (GND…) with a via</label>
+    <label><input type="checkbox" id="fill" checked> Refill zones when done</label>
+    <div style="display:flex; gap:8px; margin-top:10px">
+      <button class="primary" id="go">Route</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="close">Close</button>
+    </div>
+    <canvas id="curve" width="272" height="120"></canvas>
+    <div id="log"></div>
+  </aside>
+  <main>
+    <div id="status">Loading board…</div>
+    <div class="stage"><canvas id="board"></canvas></div>
+    <footer>
+      <span class="sw" style="background:var(--front)"></span>front
+      <span class="sw" style="background:var(--back)"></span>back
+      <span class="sw" style="background:#e0782a"></span>learned congestion
+      <span class="sw" style="background:var(--accent)"></span>two nets fighting
+      <span class="sw" style="background:#4cc9f0"></span>A* wavefront
+    </footer>
+  </main>
+</div>
+<script>
+const LAYER = ["#e8433a","#3b7ddd","#3fae5a","#c9a227","#a05ad1","#2bb5b0","#d16fa0","#888"];
+let S = null, ST = { frame:{}, curve:[], log:[] }, lastVersion = -1;
+const $ = id => document.getElementById(id);
+const cv = $("board"), ctx = cv.getContext("2d");
+
+async function j(url, body) {
+  const r = await fetch(url, body ? {method:"POST", body: JSON.stringify(body)} : {});
+  return r.json();
+}
+
+async function init() {
+  S = await j("/static");
+  const s = S.settings;
+  for (const k of ["track_width","clearance","via_diameter","via_drill","edge_clearance","max_passes","via_cost"])
+    $(k).value = +(+s[k]).toFixed(4);
+  const n = S.selected.length;
+  $("selLabel").textContent = `Selected (${n} net${n === 1 ? "" : "s"})`;
+  if (n) $("scopeSel").checked = true; else $("scopeSel").disabled = true;
+  $("status").textContent = `Ready - ${S.nets.length} nets on the board, layers ${S.layers.join(", ")}.`;
+  resize(); poll();
+}
+
+function view() {
+  const [x0,y0,x1,y1] = S.bbox, m = 1;
+  const W = cv.width, H = cv.height;
+  const sc = Math.min(W / (x1 - x0 + 2*m), H / (y1 - y0 + 2*m));
+  const ox = (W - (x1 - x0) * sc) / 2 - x0 * sc, oy = (H - (y1 - y0) * sc) / 2 - y0 * sc;
+  return { sc, X: x => ox + x * sc, Y: y => oy + y * sc };
+}
+
+function draw() {
+  if (!S) return;
+  const v = view(), dpr = window.devicePixelRatio || 1;
+  ctx.fillStyle = "#14161a"; ctx.fillRect(0, 0, cv.width, cv.height);
+  // board
+  ctx.fillStyle = "#0d2416";
+  const [x0,y0,x1,y1] = S.bbox;
+  ctx.fillRect(v.X(x0), v.Y(y0), (x1 - x0) * v.sc, (y1 - y0) * v.sc);
+  const G = ST.grid, F = ST.frame || {};
+  const cell = (xy, color) => {
+    const gx = xy % G.nx, gy = Math.floor(xy / G.nx);
+    const cx = G.x0 + gx * G.pitch, cy = G.y0 + gy * G.pitch, h = G.pitch / 2;
+    ctx.fillStyle = color; ctx.fillRect(v.X(cx - h), v.Y(cy - h), G.pitch * v.sc + .5, G.pitch * v.sc + .5);
+  };
+  if (G && F.heat) for (const [xy, h] of F.heat) cell(xy, `rgba(224,120,42,${Math.min(.85, .15 + Math.log1p(h) / 3)})`);
+  if (G && F.explored) for (const xy of F.explored) cell(xy, "rgba(76,201,240,.28)");
+  // outline
+  ctx.strokeStyle = "#e5d38a"; ctx.lineWidth = 1.2 * dpr;
+  for (const [a,b,c,d] of S.outline) { ctx.beginPath(); ctx.moveTo(v.X(a), v.Y(b)); ctx.lineTo(v.X(c), v.Y(d)); ctx.stroke(); }
+  // pads
+  for (const p of S.pads) {
+    ctx.fillStyle = p.net ? "rgba(170,176,182,.9)" : "rgba(100,104,108,.9)";
+    ctx.beginPath();
+    if (p.poly) { p.poly.forEach(([x, y], i) => i ? ctx.lineTo(v.X(x), v.Y(y)) : ctx.moveTo(v.X(x), v.Y(y))); ctx.closePath(); }
+    else ctx.arc(v.X(p.c[0]), v.Y(p.c[1]), p.r * v.sc, 0, 7);
+    ctx.fill();
+  }
+  for (const [hx, hy, hd] of S.holes) { ctx.fillStyle = "#0a0c0e"; ctx.beginPath(); ctx.arc(v.X(hx), v.Y(hy), hd / 2 * v.sc, 0, 7); ctx.fill(); }
+  if (!G) return;
+  const P = xy => [v.X(G.x0 + (xy % G.nx) * G.pitch), v.Y(G.y0 + Math.floor(xy / G.nx) * G.pitch)];
+  // tracks: back layers first
+  const paths = (F.paths || []).slice().sort((a, b) => b[0] - a[0]);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  for (const [l, run, hl] of paths) {
+    ctx.strokeStyle = LAYER[l % LAYER.length];
+    ctx.lineWidth = Math.max(1.5 * dpr, (hl ? 1.6 : 1) * 0.25 * v.sc);
+    ctx.globalAlpha = hl ? 1 : .88;
+    ctx.beginPath(); run.forEach((xy, i) => { const [x, y] = P(xy); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  for (const xy of F.vias || []) {
+    const [x, y] = P(xy); ctx.fillStyle = "#ddd"; ctx.beginPath();
+    ctx.arc(x, y, Math.max(2.5 * dpr, 0.3 * v.sc), 0, 7); ctx.fill();
+  }
+  ctx.strokeStyle = "#ffe14d"; ctx.lineWidth = 1.5 * dpr;
+  for (const xy of F.over || []) { const [x, y] = P(xy), h = G.pitch * v.sc / 2 + 1; ctx.strokeRect(x - h, y - h, 2*h, 2*h); }
+}
+
+function drawCurve() {
+  const c = $("curve"), g = c.getContext("2d"), d = ST.curve || [];
+  g.clearRect(0, 0, c.width, c.height);
+  g.fillStyle = "#9aa0a6"; g.font = "11px system-ui"; g.fillText("overused cells per pass", 8, 14);
+  if (!d.length) return;
+  const max = Math.max(1, ...d), n = Math.max(5, d.length);
+  g.strokeStyle = "#2c3038"; g.beginPath(); g.moveTo(14, c.height - 12); g.lineTo(c.width - 10, c.height - 12); g.stroke();
+  const X = i => 14 + (c.width - 24) * i / (n - 1), Y = y => c.height - 12 - (c.height - 34) * y / max;
+  g.strokeStyle = "#ffe14d"; g.lineWidth = 1.6; g.beginPath();
+  d.forEach((y, i) => i ? g.lineTo(X(i), Y(y)) : g.moveTo(X(i), Y(y))); g.stroke();
+  g.fillStyle = "#ffe14d"; d.forEach((y, i) => { g.beginPath(); g.arc(X(i), Y(y), 2.4, 0, 7); g.fill(); });
+  g.fillStyle = "#9aa0a6"; g.fillText(String(max), 4, 28); g.fillText("0", 4, c.height - 8);
+}
+
+async function poll() {
+  try {
+    const st = await j("/state");
+    if (st.version !== lastVersion) {
+      lastVersion = st.version; ST = st;
+      $("status").textContent = st.status;
+      const log = $("log"); log.textContent = st.log.join("\n"); log.scrollTop = log.scrollHeight;
+      draw(); drawCurve();
+    }
+    $("go").disabled = st.running; $("stop").disabled = !st.running; $("close").disabled = st.running;
+    setTimeout(poll, st.running ? 120 : 800);
+  } catch (e) {
+    $("status").textContent = "Plugin process has ended - you can close this tab.";
+  }
+}
+
+function resize() {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  cv.width = Math.max(100, r.width * dpr); cv.height = Math.max(100, r.height * dpr); draw();
+}
+window.addEventListener("resize", resize);
+
+$("go").onclick = () => {
+  const o = { scope: document.querySelector("input[name=scope]:checked").value,
+              rip: $("rip").checked, fanout: $("fanout").checked, fill: $("fill").checked };
+  for (const k of ["track_width","clearance","via_diameter","via_drill","edge_clearance","via_cost"]) o[k] = parseFloat($(k).value);
+  o.max_passes = parseInt($("max_passes").value, 10);
+  j("/route", o);
+};
+$("stop").onclick = () => j("/stop", {});
+$("close").onclick = async () => { await j("/close", {}); $("status").textContent = "Closed - you can close this tab."; };
+init();
+</script>
+</body>
+</html>

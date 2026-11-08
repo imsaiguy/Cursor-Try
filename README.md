@@ -115,8 +115,9 @@ one depending on which folder you copy it into.
 Click it and your web browser opens the router's window. It shows your board
 with its existing tracks and a routed / partly routed / unrouted summary.
 Choose **Unrouted only** (the default), **Selected**, or **All nets**, check
-the rules (they come from the Default net class), and press **Route**.
-chart shows conflicts dropping pass by pass.
+the rules (they come from the Default net class), and press **Route**. The
+board view shows the router thinking, and the chart shows conflicts dropping
+pass by pass.
 
 When it finishes, the tracks and vias go onto your board as **one undo step**
 (Edit ▸ Undo removes them all), and zones are refilled. Press **Close** when

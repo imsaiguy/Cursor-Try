@@ -1,0 +1,146 @@
+import math
+import os
+import sys
+
+import pytest
+
+HERE = os.path.dirname(__file__)
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "examples"))
+sys.path.insert(0, HERE)
+
+from geom_check import clearance_violations, connected  # noqa: E402
+from synthetic import crossing_board, mixed_board, rect_outline  # noqa: E402
+
+from kicad_autorouter import Board, Pad, RouteSettings, route  # noqa: E402
+from kicad_autorouter.kicad_pcb import PcbFile, parse_sexpr  # noqa: E402
+from kicad_autorouter.problem import build_problem  # noqa: E402
+from kicad_autorouter.router import Router  # noqa: E402
+
+DEMO = os.path.join(ROOT, "examples", "demo_unrouted.kicad_pcb")
+
+
+# ------------------------------------------------------------------ geometry
+def test_pad_distance_rotated_rect():
+    p = Pad("A", 10, 10, 2.0, 1.0, "rect", 90, {"F.Cu"})
+    # rotated 90 deg: now 1 wide (x) and 2 tall (y)
+    assert p.distance(10, 10.9) == 0
+    assert p.distance(10.9, 10) == pytest.approx(0.4)
+
+
+def test_pad_distance_circle_and_oval():
+    c = Pad("A", 0, 0, 2, 2, "circle")
+    assert c.distance(3, 0) == pytest.approx(2)
+    o = Pad("A", 0, 0, 4, 2, "oval")
+    assert o.distance(2, 0) == 0
+    assert o.distance(0, 2) == pytest.approx(1)
+    assert o.distance(4, 0) == pytest.approx(2)
+
+
+def test_parse_sexpr():
+    t = parse_sexpr('(a (b 1 2) "x y" (c "q\\"z"))')
+    assert t[0] == "a" and t[1] == ["b", "1", "2"] and t[2] == "x y" and t[3][1] == 'q"z'
+
+
+# ------------------------------------------------------------------ routing
+@pytest.mark.parametrize("make", [lambda: crossing_board(8, 1), lambda: crossing_board(10, 2), mixed_board])
+def test_routes_are_legal_and_connected(make):
+    b = make()
+    s = RouteSettings()
+    res = route(b, s)
+    assert res.converged
+    assert clearance_violations(b, res, s) == []
+    for name, nr in res.nets.items():
+        assert nr.complete
+        assert connected(b, res, name, s.track_width), name
+
+
+def test_route_only_selected_nets():
+    b = crossing_board(8, 1)
+    res = route(b, RouteSettings(), nets=["N0", "N3"])
+    assert set(res.nets) == {"N0", "N3"}
+
+
+def test_existing_tracks_are_respected():
+    """Route two nets, then route the rest around them: still legal."""
+    b = crossing_board(8, 1)
+    s = RouteSettings()
+    first = route(b, s, nets=["N2", "N5"])
+    from kicad_autorouter.model import Track, Via
+    for n, nr in first.nets.items():
+        for (x1, y1, x2, y2, l) in nr.segments:
+            b.tracks.append(Track(n, x1, y1, x2, y2, s.track_width, l))
+        for (x, y) in nr.vias:
+            b.vias.append(Via(n, x, y, s.via_diameter))
+    second = route(b, s)
+    assert second.skipped.get("N2") == "already complete"
+    merged = type(second)({**first.nets, **{k: v for k, v in second.nets.items()}},
+                          second.passes, True, [], {})
+    assert clearance_violations(b, merged, s) == []
+
+
+def test_blocked_net_fails_cleanly():
+    """A pad boxed in by another net's pads cannot be reached: reported, not crashed."""
+    pads = [Pad("A", 5, 5, 1, 1, "rect", 0, {"F.Cu"}), Pad("A", 15, 5, 1, 1, "rect", 0, {"F.Cu"})]
+    for k in range(8):
+        a = 2 * math.pi * k / 8
+        pads.append(Pad("W", 15 + 1.2 * math.cos(a), 5 + 1.2 * math.sin(a), 1.0, 1.0, "circle", 0, {"F.Cu"}))
+    b = Board(["F.Cu"], rect_outline(0, 0, 20, 10), pads)
+    res = route(b, RouteSettings(max_passes=5), nets=["A"])
+    assert not res.nets["A"].complete
+
+
+def test_events_and_cancel():
+    b = crossing_board(8, 1)
+    seen = []
+
+    def cb(ev, d):
+        seen.append(ev)
+        return not (ev == "pass_end")      # stop after the first pass
+    pb = build_problem(b, RouteSettings())
+    res = Router(pb, cb).run()
+    assert res.cancelled and len(res.passes) == 1
+    assert seen[0] == "pass_start" and "connection" in seen and seen[-1] == "done"
+
+
+def test_multipass_improves():
+    """Pass 1 overlaps; later passes negotiate the overuse down to zero."""
+    res = route(crossing_board(10, 2), RouteSettings())
+    over = [p.overused for p in res.passes]
+    assert over[0] > 0 and over[-1] == 0 and len(over) > 1
+
+
+# ------------------------------------------------------------------ kicad files
+@pytest.mark.skipif(not os.path.exists(DEMO), reason="demo board missing")
+def test_kicad_file_roundtrip(tmp_path):
+    pcb = PcbFile(DEMO)
+    board = pcb.board()
+    assert len(board.pads) == 60 and board.zone_layers == {"GND": {"B.Cu"}} and len(board.holes) == 2
+    s = pcb.settings_from_project()
+    res = route(board, s)
+    assert all(nr.complete for nr in res.nets.values())
+    n = pcb.add_routes(res, s)
+    out = tmp_path / "routed.kicad_pcb"
+    pcb.save(str(out))
+    again = PcbFile(str(out)).board()
+    assert len(again.tracks) + len(again.vias) == n
+    assert clearance_violations(board, res, s) == []
+
+
+@pytest.mark.skipif(not os.path.exists(DEMO), reason="demo board missing")
+def test_kicad_drc_clean(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    from drc_check import drc
+    pcb = PcbFile(DEMO)
+    s = pcb.settings_from_project()
+    res = route(pcb.board(), s)
+    pcb.add_routes(res, s)
+    out = str(tmp_path / "routed.kicad_pcb")
+    pcb.save(out)
+    kinds, unconnected, _ = drc(out)
+    copper = {k: v for k, v in kinds.items()
+              if k in ("clearance", "shorting_items", "tracks_crossing", "copper_edge_clearance",
+                       "hole_clearance", "hole_to_hole", "track_dangling", "via_dangling")}
+    assert copper == {}
+    assert unconnected == 0

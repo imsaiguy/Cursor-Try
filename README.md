@@ -93,7 +93,7 @@ one depending on which folder you copy it into.
    | Linux | `~/.local/share/kicad/10.0/plugins/` |
 
    You should end up with `.../10.0/plugins/kicad_autorouter/plugin.json`.
-   **Note: this is `plugins`, not `scripting/plugins`.**
+   **Note: this is `plugins`, not `scripting/plugins`.** Subfolders are fine.
 3. **Restart KiCad.** The first time, KiCad builds a small Python environment
    for the plugin and installs `kicad-python` from `requirements.txt`. That
    needs internet access once and can take a minute before the button becomes
@@ -124,15 +124,34 @@ you're done.
 
 ### Button not showing?
 
-* **Check the path.** With a ZIP download the folder often ends up one level
-  too deep, e.g. `plugins/Cursor-Try-main/kicad_autorouter/`. Move
-  `kicad_autorouter` up so it sits directly in `plugins/`.
-* **KiCad 10:** check that the KiCad API is enabled (step 1). Also check
-  **Preferences ▸ Plugins** for errors: if `requirements.txt` couldn't be
-  installed (no internet, or no Python interpreter configured), the plugin is
-  listed there with the reason.
-* **KiCad 7/8:** see **Tools ▸ External Plugins ▸ Show Plugin Errors** (or the
-  Scripting Console).
+Run the checker. It needs only the standard library and works with any
+Python 3:
+
+```bash
+python kicad_autorouter/check_install.py
+```
+
+It checks the four conditions KiCad 10 needs before it shows an IPC plugin
+button (taken from KiCad 10.0's source) and prints what to fix:
+
+1. **The plugin folder.** `plugin.json` must be under `.../10.0/plugins/`;
+   KiCad searches subfolders, so ZIP nesting is fine. `scripting/plugins` is
+   the old KiCad 7/8 location.
+2. **The KiCad API is enabled.** It is off by default: Preferences ▸
+   Preferences ▸ Plugins.
+3. **A usable Python interpreter.** Windows and macOS use KiCad's bundled
+   Python. Linux uses `python3` and needs the `venv` module
+   (`sudo apt install python3-venv` on Debian/Ubuntu). On **Linux with
+   Python 3.14**, `kicad-python`'s dependencies have no prebuilt wheels yet,
+   so point KiCad at Python 3.11–3.13.
+4. **The plugin environment is built.** At startup KiCad creates a virtual
+   environment and pip-installs `kicad-python` (needs internet once). **The
+   button only appears after this succeeds**, so after changing anything,
+   **restart KiCad and wait a minute**. *Refresh Plugins* does not rebuild
+   it.
+
+KiCad 7/8: see **Tools ▸ External Plugins ▸ Show Plugin Errors** (or the
+Scripting Console).
 
 ## Command line (no KiCad GUI needed)
 
@@ -171,6 +190,7 @@ pcb.add_routes(result, pcb.settings_from_project()); pcb.save("routed.kicad_pcb"
 | `kicad_autorouter/viz.py` | matplotlib live view / GIF / PNG |
 | `kicad_autorouter/kicad_pcb.py` | `.kicad_pcb` reader and writer (KiCad 6–9 S-expression format) |
 | `kicad_autorouter/plugin.json`, `ipc_action.py`, `requirements.txt` | KiCad 9/10 IPC plugin manifest and entry point |
+| `kicad_autorouter/check_install.py` | "why no button?" checker for KiCad 9/10 installs |
 | `kicad_autorouter/ipc_plugin.py`, `ipc_ui.html` | KiCad 9/10 adapter (kicad-python), browser thinking view, single-commit writeback |
 | `kicad_autorouter/plugin.py` | KiCad 7/8 SWIG action plugin: wx dialog, thinking panel, pcbnew adapter |
 | `examples/make_test_board.py` | builds the demo board with KiCad's own `pcbnew` API |
